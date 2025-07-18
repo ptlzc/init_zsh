@@ -121,6 +121,7 @@ detect_location() {
 
 # 配置APT源
 configure_apt_sources() {
+    sudo sed -i '/^deb cdrom:/ s/^/#/' /etc/apt/sources.list
     if [ "$DISTRO" != "ubuntu" ] && [ "$DISTRO" != "debian" ]; then
         return 0
     fi
