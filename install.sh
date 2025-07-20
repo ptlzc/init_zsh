@@ -368,6 +368,17 @@ initialize() {
     # 获取当前主机名
     CURRENT_HOSTNAME=$(hostname)
     log_info "当前主机名: $CURRENT_HOSTNAME"
+    
+    # 检查并修复主机名解析问题
+    if ! grep -q "127.0.1.1.*$CURRENT_HOSTNAME" /etc/hosts; then
+        log_warning "检测到主机名解析问题，正在修复..."
+        if grep -q "127.0.1.1" /etc/hosts; then
+            sed -i "s/127.0.1.1.*/127.0.1.1\t$CURRENT_HOSTNAME/" /etc/hosts
+        else
+            echo "127.0.1.1 $CURRENT_HOSTNAME" >> /etc/hosts
+        fi
+        log_success "主机名解析问题已修复"
+    fi
 }
 
 # 显示主菜单
@@ -396,6 +407,7 @@ show_menu() {
     echo "8️⃣  安装 Docker"
     echo "9️⃣  生成配置文件和验证安装"
     echo "🔟  硬盘扩容功能"
+    echo "1️⃣1️⃣  配置SSH服务器"
     echo ""
     echo "🚀 all  - 执行全部安装"
     echo "🔧 menu - 显示此菜单"
@@ -440,8 +452,18 @@ option_2_hostname() {
         if [ -n "$new_hostname" ]; then
             log_info "设置主机名为: $new_hostname"
             sudo hostnamectl set-hostname "$new_hostname"
+            
+            # 更新 /etc/hosts 文件
+            log_info "更新 /etc/hosts 文件..."
+            if grep -q "127.0.1.1" /etc/hosts; then
+                sudo sed -i "s/127.0.1.1.*/127.0.1.1\t$new_hostname/" /etc/hosts
+            else
+                echo "127.0.1.1 $new_hostname" | sudo tee -a /etc/hosts > /dev/null
+            fi
+            
             CURRENT_HOSTNAME="$new_hostname"
             log_success "主机名已设置为: $new_hostname"
+            log_success "hosts 文件已更新"
         else
             log_warning "主机名不能为空，跳过设置"
         fi
@@ -653,27 +675,15 @@ option_6_volta() {
     log_info "========== 安装 Volta 和 Node.js 工具 =========="
     
     # 安装 Volta
-    if [ ! -d "$HOME/.volta" ]; then
-        if [ "$OFFLINE_MODE" = false ]; then
-            log_info "安装 Volta..."
-            if curl https://get.volta.sh | bash; then
-                export VOLTA_HOME="$HOME/.volta"
-                export PATH="$VOLTA_HOME/bin:$PATH"
-                log_success "Volta 已安装"
-            else
-                log_error "Volta 安装失败"
-                return 1
-            fi
-        else
-            log_warning "离线模式下无法安装 Volta"
-            return 1
-        fi
-    else
-        log_success "Volta 已经安装"
-        export VOLTA_HOME="$HOME/.volta"
+    if curl https://get.volta.sh | bash; then
+  	export VOLTA_HOME="$HOME/.volta"
         export PATH="$VOLTA_HOME/bin:$PATH"
+        log_success "Volta 已安装"
+    else
+        log_error "Volta 安装失败"
+        return 1
     fi
-    
+
     # 安装 Node.js
     if command -v volta &> /dev/null; then
         log_info "通过 Volta 安装 Node.js LTS..."
@@ -795,8 +805,7 @@ option_8_docker() {
         "https://registry.docker-cn.com",
         "https://docker.mirrors.ustc.edu.cn"
     ],
-    "ipv6": false,
-    "fixed-cidr-v6": false
+    "ipv6": false
 }
 EOF
                         sudo systemctl restart docker
@@ -830,8 +839,7 @@ EOF
         "https://registry.docker-cn.com",
         "https://docker.mirrors.ustc.edu.cn"
     ],
-    "ipv6": false,
-    "fixed-cidr-v6": false
+    "ipv6": false
 }
 EOF
                         sudo systemctl restart docker
@@ -855,8 +863,7 @@ EOF
         "https://registry.docker-cn.com",
         "https://docker.mirrors.ustc.edu.cn"
     ],
-    "ipv6": false,
-    "fixed-cidr-v6": false
+    "ipv6": false
 }
 EOF
                         sudo systemctl restart docker
@@ -1369,6 +1376,301 @@ expand_disk() {
     log_success "硬盘扩容完成！"
 }
 
+# 11. 配置SSH服务器
+option_11_ssh() {
+    log_info "========== 配置SSH服务器 =========="
+    
+    # 检查sudo权限
+    if ! sudo -n true 2>/dev/null; then
+        log_info "此操作需要sudo权限"
+        sudo -v || return 1
+    fi
+    
+    # 检查SSH服务状态
+    check_ssh_service
+    
+    # 配置SSH允许root密钥登录
+    configure_ssh_root_login
+    
+    # 生成SSH密钥对
+    generate_ssh_keys
+    
+    # 重启SSH服务
+    restart_ssh_service
+    
+    # 显示配置信息
+    show_ssh_info
+    
+    echo ""
+    read -p "按回车键继续..." -r
+}
+
+# 检查SSH服务状态
+check_ssh_service() {
+    log_info "检查SSH服务状态..."
+    
+    # 安装SSH服务器（如果未安装）
+    if ! command -v sshd &> /dev/null; then
+        log_info "安装SSH服务器..."
+        case $PACKAGE_MANAGER in
+            "apt-get")
+                sudo apt-get update
+                sudo apt-get install -y openssh-server
+                ;;
+            "yum")
+                sudo yum install -y openssh-server
+                ;;
+            "pacman")
+                sudo pacman -S --noconfirm openssh
+                ;;
+        esac
+    else
+        log_success "SSH服务器已安装"
+    fi
+    
+    # 启动并启用SSH服务
+    if systemctl is-active --quiet ssh || systemctl is-active --quiet sshd; then
+        log_success "SSH服务正在运行"
+    else
+        log_info "启动SSH服务..."
+        # 不同系统的SSH服务名称可能不同
+        if systemctl list-unit-files | grep -q "^ssh\.service"; then
+            sudo systemctl start ssh
+            sudo systemctl enable ssh
+        elif systemctl list-unit-files | grep -q "^sshd\.service"; then
+            sudo systemctl start sshd
+            sudo systemctl enable sshd
+        else
+            log_error "无法找到SSH服务"
+            return 1
+        fi
+    fi
+}
+
+# 配置SSH允许root密钥登录
+configure_ssh_root_login() {
+    log_info "配置SSH允许root密钥登录..."
+    
+    local ssh_config="/etc/ssh/sshd_config"
+    local backup_config="${ssh_config}.backup.$(date +%Y%m%d_%H%M%S)"
+    
+    # 备份原始配置文件
+    log_info "备份SSH配置文件..."
+    sudo cp "$ssh_config" "$backup_config"
+    log_success "已备份到: $backup_config"
+    
+    # 检查当前配置
+    log_info "检查当前SSH配置..."
+    
+    # 创建临时配置文件
+    local temp_config="/tmp/sshd_config_new"
+    sudo cp "$ssh_config" "$temp_config"
+    
+    # 配置参数
+    local changes_made=false
+    
+    # 1. 配置PermitRootLogin
+    if grep -q "^#*PermitRootLogin" "$temp_config"; then
+        # 替换现有配置
+        sudo sed -i 's/^#*PermitRootLogin.*/PermitRootLogin prohibit-password/' "$temp_config"
+        log_info "修改 PermitRootLogin 为 prohibit-password"
+        changes_made=true
+    else
+        # 添加新配置
+        echo "PermitRootLogin prohibit-password" | sudo tee -a "$temp_config" > /dev/null
+        log_info "添加 PermitRootLogin prohibit-password"
+        changes_made=true
+    fi
+    
+    # 2. 配置PubkeyAuthentication
+    if grep -q "^#*PubkeyAuthentication" "$temp_config"; then
+        sudo sed -i 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' "$temp_config"
+        log_info "启用 PubkeyAuthentication"
+        changes_made=true
+    else
+        echo "PubkeyAuthentication yes" | sudo tee -a "$temp_config" > /dev/null
+        log_info "添加 PubkeyAuthentication yes"
+        changes_made=true
+    fi
+    
+    # 3. 配置AuthorizedKeysFile
+    if ! grep -q "^#*AuthorizedKeysFile" "$temp_config"; then
+        echo "AuthorizedKeysFile .ssh/authorized_keys" | sudo tee -a "$temp_config" > /dev/null
+        log_info "添加 AuthorizedKeysFile 配置"
+        changes_made=true
+    fi
+    
+    # 4. 禁用密码登录（可选，更安全）
+    echo ""
+    echo "是否同时禁用root用户密码登录？（推荐，更安全）(y/n)"
+    read -r disable_password
+    
+    if [[ "$disable_password" =~ ^[Yy]$ ]]; then
+        if grep -q "^#*PasswordAuthentication" "$temp_config"; then
+            sudo sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' "$temp_config"
+            log_info "禁用密码认证"
+            changes_made=true
+        else
+            echo "PasswordAuthentication no" | sudo tee -a "$temp_config" > /dev/null
+            log_info "添加禁用密码认证配置"
+            changes_made=true
+        fi
+    fi
+    
+    # 应用配置
+    if [ "$changes_made" = true ]; then
+        sudo mv "$temp_config" "$ssh_config"
+        log_success "SSH配置已更新"
+        
+        # 验证配置文件语法
+        if sudo sshd -t; then
+            log_success "SSH配置文件语法检查通过"
+        else
+            log_error "SSH配置文件语法错误，恢复备份"
+            sudo cp "$backup_config" "$ssh_config"
+            return 1
+        fi
+    else
+        sudo rm -f "$temp_config"
+        log_success "SSH配置无需修改"
+    fi
+}
+
+# 生成SSH密钥对
+generate_ssh_keys() {
+    log_info "配置SSH密钥..."
+    
+    local ssh_dir="/root/.ssh"
+    local private_key="$ssh_dir/id_rsa"
+    local public_key="$ssh_dir/id_rsa.pub"
+    local authorized_keys="$ssh_dir/authorized_keys"
+    
+    # 创建.ssh目录
+    if [ ! -d "$ssh_dir" ]; then
+        mkdir -p "$ssh_dir"
+        chmod 700 "$ssh_dir"
+        log_success "创建 .ssh 目录"
+    fi
+    
+    # 检查是否已有密钥
+    if [ -f "$private_key" ]; then
+        log_warning "SSH密钥已存在"
+        echo "是否重新生成SSH密钥？(y/n)"
+        read -r regenerate_key
+        
+        if [[ ! "$regenerate_key" =~ ^[Yy]$ ]]; then
+            log_info "使用现有SSH密钥"
+        else
+            log_info "重新生成SSH密钥..."
+            rm -f "$private_key" "$public_key"
+            ssh-keygen -t rsa -b 4096 -C "root@$CURRENT_HOSTNAME" -f "$private_key" -N ""
+            log_success "SSH密钥已生成"
+        fi
+    else
+        log_info "生成新的SSH密钥..."
+        ssh-keygen -t rsa -b 4096 -C "root@$CURRENT_HOSTNAME" -f "$private_key" -N ""
+        log_success "SSH密钥已生成"
+    fi
+    
+    # 设置正确的权限
+    chmod 600 "$private_key"
+    chmod 644 "$public_key"
+    
+    # 将公钥添加到authorized_keys
+    if [ -f "$public_key" ]; then
+        # 检查公钥是否已在authorized_keys中
+        if [ -f "$authorized_keys" ] && grep -Fq "$(cat $public_key)" "$authorized_keys"; then
+            log_success "公钥已在authorized_keys中"
+        else
+            cat "$public_key" >> "$authorized_keys"
+            chmod 600 "$authorized_keys"
+            log_success "公钥已添加到authorized_keys"
+        fi
+    fi
+}
+
+# 重启SSH服务
+restart_ssh_service() {
+    log_info "重启SSH服务..."
+    
+    # 确定SSH服务名称
+    local ssh_service=""
+    if systemctl list-unit-files | grep -q "^ssh\.service"; then
+        ssh_service="ssh"
+    elif systemctl list-unit-files | grep -q "^sshd\.service"; then
+        ssh_service="sshd"
+    else
+        log_error "无法确定SSH服务名称"
+        return 1
+    fi
+    
+    # 重启服务
+    if sudo systemctl restart "$ssh_service"; then
+        log_success "SSH服务已重启"
+    else
+        log_error "SSH服务重启失败"
+        return 1
+    fi
+    
+    # 检查服务状态
+    if systemctl is-active --quiet "$ssh_service"; then
+        log_success "SSH服务运行正常"
+    else
+        log_error "SSH服务未正常运行"
+        return 1
+    fi
+}
+
+# 显示SSH配置信息
+show_ssh_info() {
+    log_success "SSH配置完成！"
+    echo ""
+    echo "=============================================="
+    echo "📋 SSH配置信息"
+    echo "=============================================="
+    
+    # 显示服务状态
+    local ssh_service=""
+    if systemctl list-unit-files | grep -q "^ssh\.service"; then
+        ssh_service="ssh"
+    elif systemctl list-unit-files | grep -q "^sshd\.service"; then
+        ssh_service="sshd"
+    fi
+    
+    if [ -n "$ssh_service" ]; then
+        echo "🔧 SSH服务状态: $(systemctl is-active $ssh_service)"
+        echo "🚪 SSH服务端口: $(sudo grep -E "^Port|^#Port" /etc/ssh/sshd_config | tail -1 | awk '{print $2}' || echo "22")"
+    fi
+    
+    # 显示服务器IP地址
+    echo "🌐 服务器IP地址:"
+    ip addr show | grep 'inet ' | grep -v '127.0.0.1' | awk '{print "   " $2}' | cut -d/ -f1
+    
+    # 显示公钥
+    local public_key="/root/.ssh/id_rsa.pub"
+    if [ -f "$public_key" ]; then
+        echo ""
+        echo "🔑 Root用户SSH公钥 (请复制此公钥到客户端):"
+        echo "=============================================="
+        cat "$public_key"
+        echo "=============================================="
+        echo ""
+        echo "💡 使用说明:"
+        echo "   1. 复制上面的公钥内容"
+        echo "   2. 在客户端将公钥保存为私钥文件 (如: ~/.ssh/server_rsa.pub)"
+        echo "   3. 对应的私钥已保存在服务器: /root/.ssh/id_rsa"
+        echo "   4. 连接命令示例: ssh -i ~/.ssh/server_rsa root@服务器IP"
+        echo ""
+        echo "⚠️  安全提示:"
+        echo "   - 请妥善保管私钥文件"
+        echo "   - 建议禁用密码登录以提高安全性"
+        echo "   - 定期更换SSH密钥"
+    fi
+    
+    echo ""
+    echo "✅ SSH服务器配置完成，现在支持root用户密钥登录"
+}
+
 # 主程序循环
 main() {
     # 初始化
@@ -1377,7 +1679,7 @@ main() {
     # 主菜单循环
     while true; do
         show_menu
-        echo -n "请输入选择 (1-10, all, menu, q): "
+        echo -n "请输入选择 (1-11, all, menu, q): "
         read -r choice
         
         case $choice in
@@ -1410,6 +1712,9 @@ main() {
                 ;;
             10)
                 option_10_disk_expand
+                ;;
+            11)
+                option_11_ssh
                 ;;
             "all"|"ALL")
                 install_all
